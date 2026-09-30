@@ -19,6 +19,7 @@ from fabweave.energy.demand import coincident_peak, demand_violations
 from fabweave.genealogy.carrier import GenealogyGraph
 from fabweave.holds.release import HoldState, release_decision
 from fabweave.lot.merge import Lot, merge_lots
+from fabweave.lot.split import MachineCapacity, SplitLedger, plan_split, split_allocation
 from fabweave.maintenance.window import MaintenancePolicy, assignment_decision
 from fabweave.metrology.sampling import Wafer, deterministic_sample
 from fabweave.queue_time.enforcer import QueueLimit, queue_time_decision
@@ -44,6 +45,7 @@ from fabweave.workflows.control import (
     record_containment,
     reserve_qualified,
     rework_release_decision,
+    split_for_parallel_capacity,
 )
 
 

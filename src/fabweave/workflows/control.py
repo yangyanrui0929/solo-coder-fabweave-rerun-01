@@ -15,6 +15,7 @@ from fabweave.energy.demand import demand_violations
 from fabweave.genealogy.carrier import GenealogyGraph
 from fabweave.holds.release import HoldState, release_decision
 from fabweave.lot.merge import Lot, merge_lots
+from fabweave.lot.split import MachineCapacity, SplitLedger, plan_split
 from fabweave.maintenance.window import MaintenancePolicy, assignment_decision
 from fabweave.metrology.sampling import Wafer, deterministic_sample
 from fabweave.queue_time.enforcer import QueueLimit, queue_time_decision
@@ -230,6 +231,79 @@ def merge_and_commit(request_id: str, lots: list[Lot], ledger: CommitLedger, ord
     merged = merge_lots(request_id, lots)
     allocation = ledger.allocate(request_id, order_id, merged.quantity)
     return merged, allocation
+
+
+def split_for_parallel_capacity(
+    ledger: SplitLedger,
+    book: ReservationBook,
+    log: EventLog,
+    request_id: str,
+    lot: Lot,
+    machines: list[MachineCapacity],
+    min_child_units: int,
+    qualifications: list[Qualification],
+    window: TimeBox,
+    at: int,
+) -> Decision:
+    """Split a WIP lot across idle parallel machines, all or nothing.
+
+    Every gate is evaluated before any state changes: the split plan must
+    respect the minimum child size, each child must land on a qualified
+    tool/chamber, and every reticle must be reservable for the run window.
+    A replayed request returns the identical children, reservations and
+    event; a rejection leaves no children, reservations or events behind.
+    """
+    try:
+        plan = plan_split(request_id, lot, machines, min_child_units)
+    except ValueError as error:
+        return deny(f"split:{error}", request_id=request_id)
+    previous = ledger.by_request(request_id)
+    if previous is not None:
+        if previous != plan:
+            raise ValueError("request id reused with different split")
+        return allow(request_id=request_id, parent_lot_id=lot.lot_id, children=previous, reservation_count=len(previous), replayed=True)
+    reasons: list[str] = []
+    if ledger.already_split(lot.lot_id):
+        reasons.append(f"parent_already_split:{lot.lot_id}")
+    for child in plan:
+        decision = qualification_decision(child.tool_id, child.chamber_id, child.recipe_revision, at, qualifications)
+        reasons.extend(f"{child.lot_id}:{reason}" for reason in decision.reasons)
+    if reasons:
+        return deny(*reasons, request_id=request_id)
+    requested = [Reservation(child.reticle_id, child.lot_id, window, child.recipe_revision) for child in plan]
+    try:
+        reservations = book.reserve_batch(request_id, requested)
+    except ValueError as error:
+        return deny(f"reticle:{error}", request_id=request_id)
+    children = ledger.record(request_id, plan)
+    event = log.append(
+        f"split:{request_id}",
+        0,
+        request_id,
+        at,
+        "lot_split",
+        {
+            "parent_lot_id": lot.lot_id,
+            "min_child_units": min_child_units,
+            "children": [
+                {
+                    "lot_id": child.lot_id,
+                    "tool_id": child.tool_id,
+                    "chamber_id": child.chamber_id,
+                    "reticle_id": child.reticle_id,
+                    "quantity": child.quantity,
+                }
+                for child in children
+            ],
+        },
+    )
+    return allow(
+        request_id=request_id,
+        parent_lot_id=lot.lot_id,
+        children=children,
+        reservation_count=len(reservations),
+        event_sequence=event.sequence,
+    )
 
 
 def dedicated_qualification(
